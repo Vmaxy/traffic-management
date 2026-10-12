@@ -14,7 +14,7 @@ python -m pip install -r requirements.txt
 
 Upload `firmware/traffic_signal_controller/traffic_signal_controller.ino` to an Uno/Nano. Connect each lane's red, yellow, and green LED to the pins documented in the sketch, with a 220-330 ohm resistor in series and a common ground. D13 is also the Uno's built-in LED pin.
 
-Run `python main.py` for the configured source (webcam `0` by default), or pass `--source traffic_sample.mp4`, `--source rtsp://...`, or `--source 1` for another webcam. Press `q` in the video window to shut down. The first YOLO run may download the configured model if it is not present locally.
+Run `python main.py` for the configured source (webcam `0` by default), or pass `--source traffic_sample.mp4`, `--source rtsp://...`, or `--source 1` for another webcam. Hardware serial is disabled by default; pass `--port /dev/ttyACM0` (or `--port COM3` on Windows) to connect an Arduino, and optionally set `--baudrate 115200` (default `9600`). Without `--port`, the application processes video in simulation-only mode and logs phase commands and lane green durations without probing serial devices. Press `q` in the video window to shut down. The first YOLO run may download the configured model if it is not present locally.
 
 ## Configuration
 
@@ -27,8 +27,6 @@ All settings are optional environment variables:
 | `TRAFFIC_ROI_CONFIG` | `config/intersection_rois.json` | Path to lane polygons in the file's reference resolution |
 | `TRAFFIC_MODEL` | `yolov8n.pt` | Ultralytics model path/name |
 | `TRAFFIC_CONFIDENCE` | `0.20` | Detection confidence threshold, greater than 0 and at most 1 |
-| `TRAFFIC_SERIAL_PORT` | auto-detect | Arduino serial port; set explicitly if multiple USB serial devices are attached |
-| `TRAFFIC_SERIAL_BAUD` | `9600` | Serial baud rate (must match the firmware) |
 | `TRAFFIC_MIN_GREEN_SECONDS` | `3.0` | Minimum green duration (3-30 seconds, including emergency priority clearance) |
 | `TRAFFIC_MAX_GREEN_SECONDS` | `30.0` | Maximum green duration (up to 30 seconds) before fair handoff to the opposing approach |
 | `TRAFFIC_GREEN_SCALE_FACTOR` | `1.5` | Additional green seconds per smoothed vehicle count |
@@ -38,7 +36,7 @@ All settings are optional environment variables:
 | `TRAFFIC_CAMERA_RETRY_SECONDS` | `2.0` | Delay between camera reconnection attempts |
 | `TRAFFIC_LOG_LEVEL` | `INFO` | Python log level |
 
-For example, set `TRAFFIC_VIDEO_SOURCE` to the local stream URL and `TRAFFIC_SERIAL_PORT` to the port shown by your operating system before running the application. If the Arduino is unavailable, the application logs signal commands in simulation mode and continues processing video.
+For example, set `TRAFFIC_VIDEO_SOURCE` to the local stream URL and pass `--port` with the port shown by your operating system to enable the Arduino. If the Arduino is unavailable or cannot be opened due to permissions or disconnection, the application logs the error, continues processing video, and switches to simulation mode.
 
 ## Camera ROI calibration
 

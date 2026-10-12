@@ -36,8 +36,6 @@ def test_resolves_relative_roi_path_against_project(monkeypatch):
         ("TRAFFIC_CONFIDENCE", "0"),
         ("TRAFFIC_CONFIDENCE", "1.1"),
         ("TRAFFIC_CONFIDENCE", "nan"),
-        ("TRAFFIC_SERIAL_BAUD", "0"),
-        ("TRAFFIC_SERIAL_BAUD", "fast"),
         ("TRAFFIC_MIN_GREEN_SECONDS", "-1"),
         ("TRAFFIC_MIN_GREEN_SECONDS", "2.9"),
         ("TRAFFIC_MAX_GREEN_SECONDS", "31"),

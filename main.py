@@ -57,6 +57,18 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=_parse_source,
         help="video file path, IP/RTSP URL, or webcam index (default: configured source)",
     )
+    parser.add_argument(
+        "--port",
+        type=str,
+        default=None,
+        help="Serial port for Arduino, e.g., /dev/ttyACM0 or COM3",
+    )
+    parser.add_argument(
+        "--baudrate",
+        type=int,
+        default=9600,
+        help="Baud rate for serial communication",
+    )
     return parser.parse_args(argv)
 
 
@@ -152,12 +164,21 @@ def run(argv: Sequence[str] | None = None) -> None:
         settings.camera_retry_seconds,
         max_fps=settings.max_video_fps,
     )
-    controller = ArduinoController(
-        port=settings.serial_port,
-        baud_rate=settings.serial_baud,
-        heartbeat_seconds=settings.heartbeat_seconds,
-        min_green_seconds=settings.min_green_seconds,
-    )
+    try:
+        controller = ArduinoController(
+            port=args.port,
+            baud_rate=args.baudrate,
+            heartbeat_seconds=settings.heartbeat_seconds,
+            min_green_seconds=settings.min_green_seconds,
+        )
+    except (OSError, ValueError, RuntimeError) as exc:
+        logger.exception("Unable to initialize Arduino controller; using simulation mode: %s", exc)
+        controller = ArduinoController(
+            port=None,
+            baud_rate=9600,
+            heartbeat_seconds=settings.heartbeat_seconds,
+            min_green_seconds=settings.min_green_seconds,
+        )
     fsm = SafetyFSM(
         min_green_seconds=settings.min_green_seconds,
         max_green_seconds=settings.max_green_seconds,

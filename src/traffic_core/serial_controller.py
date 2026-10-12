@@ -136,6 +136,8 @@ class ArduinoController:
             LOGGER.warning("Serial worker did not stop within %.1f seconds", timeout)
 
     def _create_serial(self) -> object | None:
+        if self.port is None:
+            return None
         try:
             if self._serial_factory is not None:
                 return self._serial_factory(
@@ -146,26 +148,9 @@ class ArduinoController:
                 )
 
             import serial
-            from serial.tools import list_ports
 
-            port = self.port
-            if port is None:
-                recognized = ("arduino", "usb serial", "ch340", "cp210", "ftdi")
-                candidates = [
-                    item.device
-                    for item in list_ports.comports()
-                    if any(token in f"{item.description} {item.manufacturer}".lower() for token in recognized)
-                ]
-                if len(candidates) == 1:
-                    port = candidates[0]
-                    LOGGER.info("Auto-detected Arduino-compatible serial port %s", port)
-                elif len(candidates) > 1:
-                    LOGGER.debug("Multiple Arduino-compatible ports found (%s)", ", ".join(candidates))
-                    return None
-                else:
-                    return None
             connection = serial.Serial(
-                port=port,
+                port=self.port,
                 baudrate=self.baud_rate,
                 timeout=0,
                 write_timeout=0,
@@ -175,7 +160,12 @@ class ArduinoController:
         except ImportError:
             LOGGER.debug("pyserial is unavailable")
         except (OSError, ValueError) as exc:
-            LOGGER.debug("Unable to connect to Arduino serial port: %s", exc)
+            LOGGER.error(
+                "Unable to initialize Arduino serial port %s; continuing in simulation mode: %s",
+                self.port,
+                exc,
+                exc_info=True,
+            )
         return None
 
     def _read_feedback(self, connection: object) -> None:
@@ -255,11 +245,18 @@ class ArduinoController:
                 if connection is None:
                     if not self._warned_unavailable:
                         LOGGER.warning(
-                            "Arduino unavailable; using simulation mode. Set TRAFFIC_SERIAL_PORT if auto-detection failed."
+                            "Arduino unavailable; using simulation mode. Set --port to enable serial hardware."
                         )
                         self._warned_unavailable = True
                     if desired is not last_simulated_phase:
-                        LOGGER.info("SIMULATION: %s", PHASE_COMMANDS[desired].strip())
+                        durations = ", ".join(
+                            f"{lane}={seconds:.1f}s" for lane, seconds in durations.items()
+                        )
+                        LOGGER.info(
+                            "SIMULATION: %s (lane green durations: %s)",
+                            PHASE_COMMANDS[desired].strip(),
+                            durations,
+                        )
                         last_simulated_phase = desired
                 else:
                     self._warned_unavailable = False

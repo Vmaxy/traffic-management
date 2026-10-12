@@ -37,8 +37,6 @@ class Settings:
     roi_config: Path = PROJECT_ROOT / "config" / "intersection_rois.json"
     model_path: str = "yolov8n.pt"
     confidence_threshold: float = 0.20
-    serial_port: str | None = None
-    serial_baud: int = 9600
     camera_retry_seconds: float = 2.0
     min_green_seconds: float = 3.0
     max_green_seconds: float = 30.0
@@ -66,14 +64,6 @@ class Settings:
         if not math.isfinite(confidence) or not 0.0 < confidence <= 1.0:
             raise ValueError("TRAFFIC_CONFIDENCE must be greater than 0 and at most 1")
 
-        baud_raw = os.getenv("TRAFFIC_SERIAL_BAUD", "9600")
-        try:
-            baud = int(baud_raw)
-        except ValueError as exc:
-            raise ValueError("TRAFFIC_SERIAL_BAUD must be an integer") from exc
-        if baud <= 0:
-            raise ValueError("TRAFFIC_SERIAL_BAUD must be greater than zero")
-
         heartbeat = _positive_float("TRAFFIC_HEARTBEAT_SECONDS", 1.0)
         if heartbeat >= 10.0:
             raise ValueError(
@@ -90,7 +80,6 @@ class Settings:
             raise ValueError("TRAFFIC_MAX_GREEN_SECONDS must be at least TRAFFIC_MIN_GREEN_SECONDS")
         green_scale_factor = _positive_float("TRAFFIC_GREEN_SCALE_FACTOR", 1.5)
 
-        serial_port = os.getenv("TRAFFIC_SERIAL_PORT", "").strip() or None
         log_level = os.getenv("TRAFFIC_LOG_LEVEL", "INFO").upper()
         if log_level not in {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"}:
             raise ValueError("TRAFFIC_LOG_LEVEL must be CRITICAL, ERROR, WARNING, INFO, or DEBUG")
@@ -100,8 +89,6 @@ class Settings:
             roi_config=roi_path,
             model_path=os.getenv("TRAFFIC_MODEL", "yolov8n.pt"),
             confidence_threshold=confidence,
-            serial_port=serial_port,
-            serial_baud=baud,
             camera_retry_seconds=_positive_float("TRAFFIC_CAMERA_RETRY_SECONDS", 2.0),
             min_green_seconds=min_green,
             max_green_seconds=max_green,

@@ -147,6 +147,29 @@ def test_plan_uses_one_duration_command_per_lane_and_a_direction_request():
         controller.shutdown()
 
 
+def test_missing_port_uses_simulation_without_opening_serial(caplog):
+    caplog.set_level("INFO")
+    factory_called = threading.Event()
+
+    def factory(**_):
+        factory_called.set()
+        raise AssertionError("serial factory must not run without an explicit port")
+
+    controller = ArduinoSerialController(
+        port=None,
+        serial_factory=factory,
+        reconnect_seconds=0.05,
+    )
+    try:
+        controller.set_plan(Phase.NS_GREEN, {lane: 5.0 for lane in LANES})
+        assert wait_until(lambda: "lane green durations" in caplog.text)
+        assert not factory_called.is_set()
+    finally:
+        controller.shutdown()
+
+    assert not factory_called.is_set()
+
+
 @pytest.mark.parametrize("heartbeat", [10.0, 11.0])
 def test_heartbeat_must_precede_hardware_watchdog(heartbeat):
     with pytest.raises(ValueError, match="10-second watchdog"):
