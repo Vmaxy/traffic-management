@@ -1,6 +1,6 @@
 #include <string.h>
 
-const unsigned long WATCHDOG_TIMEOUT_MS = 5000UL;
+const unsigned long WATCHDOG_TIMEOUT_MS = 2500UL;
 const unsigned long SERIAL_BAUD_RATE = 9600UL;
 const size_t COMMAND_BUFFER_SIZE = 32;
 

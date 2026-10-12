@@ -1,6 +1,6 @@
 # AI Miniature Traffic Management System
 
-The Python application reads an overhead camera stream, detects COCO vehicle classes with Ultralytics YOLO, counts detections in four approach regions, and selects conflict-free traffic phases. An Arduino Uno/Nano drives the 12 signal LEDs. The Python FSM enforces minimum green, yellow, and all-red clearance; the Arduino independently returns to all-red if it receives no command for five seconds.
+The Python application reads an overhead camera stream, detects COCO vehicle classes with Ultralytics YOLO, counts detections in four approach regions, and selects conflict-free traffic phases. An Arduino Uno/Nano drives the 12 signal LEDs. The Python FSM enforces minimum green, yellow, and all-red clearance; the Arduino independently returns to all-red if it receives no command for 2.5 seconds.
 
 ## Setup
 
@@ -29,7 +29,7 @@ All settings are optional environment variables:
 | `TRAFFIC_MIN_GREEN_SECONDS` | `4.0` | Minimum green duration |
 | `TRAFFIC_YELLOW_SECONDS` | `2.0` | Yellow clearance duration |
 | `TRAFFIC_ALL_RED_SECONDS` | `1.0` | All-red clearance duration |
-| `TRAFFIC_HEARTBEAT_SECONDS` | `2.0` | Current-phase resend interval; must remain below the Arduino's 5-second watchdog |
+| `TRAFFIC_HEARTBEAT_SECONDS` | `1.0` | Current-phase resend interval; must remain below the Arduino's 2.5-second watchdog |
 | `TRAFFIC_CAMERA_RETRY_SECONDS` | `2.0` | Delay between camera reconnection attempts |
 | `TRAFFIC_LOG_LEVEL` | `INFO` | Python log level |
 

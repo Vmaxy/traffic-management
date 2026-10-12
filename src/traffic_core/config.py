@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,7 +17,7 @@ def _positive_float(name: str, default: float) -> float:
         value = default if raw is None else float(raw)
     except ValueError as exc:
         raise ValueError(f"{name} must be a number, got {raw!r}") from exc
-    if value <= 0:
+    if not math.isfinite(value) or value <= 0:
         raise ValueError(f"{name} must be greater than zero")
     return value
 
@@ -42,7 +43,7 @@ class Settings:
     min_green_seconds: float = 4.0
     yellow_seconds: float = 2.0
     all_red_seconds: float = 1.0
-    heartbeat_seconds: float = 2.0
+    heartbeat_seconds: float = 1.0
     log_level: str = "INFO"
 
     @classmethod
@@ -59,7 +60,7 @@ class Settings:
             confidence = float(confidence_raw)
         except ValueError as exc:
             raise ValueError("TRAFFIC_CONFIDENCE must be a number") from exc
-        if not 0.0 < confidence <= 1.0:
+        if not math.isfinite(confidence) or not 0.0 < confidence <= 1.0:
             raise ValueError("TRAFFIC_CONFIDENCE must be greater than 0 and at most 1")
 
         baud_raw = os.getenv("TRAFFIC_SERIAL_BAUD", "9600")
@@ -70,9 +71,11 @@ class Settings:
         if baud <= 0:
             raise ValueError("TRAFFIC_SERIAL_BAUD must be greater than zero")
 
-        heartbeat = _positive_float("TRAFFIC_HEARTBEAT_SECONDS", 2.0)
-        if heartbeat >= 5.0:
-            raise ValueError("TRAFFIC_HEARTBEAT_SECONDS must be less than the 5-second Arduino watchdog")
+        heartbeat = _positive_float("TRAFFIC_HEARTBEAT_SECONDS", 1.0)
+        if heartbeat >= 2.5:
+            raise ValueError(
+                "TRAFFIC_HEARTBEAT_SECONDS must be less than the 2.5-second Arduino watchdog"
+            )
 
         serial_port = os.getenv("TRAFFIC_SERIAL_PORT", "").strip() or None
         log_level = os.getenv("TRAFFIC_LOG_LEVEL", "INFO").upper()

@@ -11,6 +11,7 @@ from traffic_core.safety_fsm import Phase
 
 
 LOGGER = logging.getLogger(__name__)
+ARDUINO_WATCHDOG_SECONDS = 2.5
 
 PHASE_COMMANDS = {
     Phase.ALL_RED: "SET_PHASE:ALL_RED\n",
@@ -26,14 +27,21 @@ class ArduinoController:
         self,
         port: str | None = None,
         baud_rate: int = 9600,
-        heartbeat_seconds: float = 2.0,
+        heartbeat_seconds: float = 1.0,
         reconnect_seconds: float = 2.0,
         serial_factory: Callable[..., object] | None = None,
     ) -> None:
-        if baud_rate <= 0 or heartbeat_seconds <= 0 or reconnect_seconds <= 0:
+        if (
+            baud_rate <= 0
+            or heartbeat_seconds <= 0
+            or reconnect_seconds <= 0
+        ):
             raise ValueError("baud rate and serial intervals must be greater than zero")
-        if heartbeat_seconds >= 5.0:
-            raise ValueError("heartbeat_seconds must be less than the Arduino's 5-second watchdog")
+        if heartbeat_seconds >= ARDUINO_WATCHDOG_SECONDS:
+            raise ValueError(
+                "heartbeat_seconds must be less than the Arduino's "
+                f"{ARDUINO_WATCHDOG_SECONDS:g}-second watchdog"
+            )
         self.port = port
         self.baud_rate = baud_rate
         self.heartbeat_seconds = heartbeat_seconds
@@ -208,3 +216,6 @@ class ArduinoController:
             connection.close()
         except (OSError, AttributeError):
             LOGGER.debug("Serial connection was already closed", exc_info=True)
+
+
+ArduinoSerialController = ArduinoController

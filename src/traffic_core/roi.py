@@ -41,6 +41,8 @@ class ROIManager:
                 raise ValueError(f"ROI {lane} points must each contain exactly two coordinates")
             if not np.isfinite(polygon).all() or ((polygon < 0.0) | (polygon > 1.0)).any():
                 raise ValueError(f"ROI {lane} coordinates must be finite and between 0.0 and 1.0")
+            if cv2.contourArea(polygon) == 0:
+                raise ValueError(f"ROI {lane} must enclose a non-zero area")
             self._normalized[lane] = polygon
 
         self._width = 0
@@ -59,7 +61,7 @@ class ROIManager:
 
     @property
     def polygons(self) -> Mapping[str, np.ndarray]:
-        return self._scaled.copy()
+        return {lane: polygon.copy() for lane, polygon in self._scaled.items()}
 
     @staticmethod
     def anchor_point(box: Box, anchor: str = "bottom_center") -> tuple[float, float]:

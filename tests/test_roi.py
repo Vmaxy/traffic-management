@@ -49,3 +49,30 @@ def test_scaled_rois_cover_all_four_lanes(roi_manager):
 def test_invalid_resolution_is_rejected(roi_manager):
     with pytest.raises(ValueError, match="greater than zero"):
         roi_manager.update_resolution(0, 480)
+
+
+def test_assignment_requires_a_frame_resolution(roi_manager):
+    manager = ROIManager(roi_manager.config_path)
+    with pytest.raises(RuntimeError, match="update_resolution"):
+        manager.assign_box((480, 100, 520, 200))
+
+
+def test_rejects_missing_and_degenerate_polygons(tmp_path):
+    path = tmp_path / "invalid.json"
+    valid_polygon = [[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]]
+    config = {lane: valid_polygon for lane in LANES if lane != "SOUTH"}
+    path.write_text(json.dumps(config), encoding="utf-8")
+    with pytest.raises(ValueError, match="SOUTH"):
+        ROIManager(path)
+
+    config = {lane: valid_polygon for lane in LANES}
+    config["NORTH"] = [[0.2, 0.2], [0.4, 0.4], [0.6, 0.6]]
+    path.write_text(json.dumps(config), encoding="utf-8")
+    with pytest.raises(ValueError, match="non-zero area"):
+        ROIManager(path)
+
+
+def test_polygons_property_does_not_allow_mutating_internal_rois(roi_manager):
+    polygons = roi_manager.polygons
+    polygons["NORTH"][:] = 0
+    assert roi_manager.assign_box((480, 100, 520, 200)) == "NORTH"

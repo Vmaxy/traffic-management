@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from enum import Enum
 from typing import Callable
@@ -23,14 +24,19 @@ class SafetyFSM:
         all_red_seconds: float = 1.0,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        if min_green_seconds <= 0 or yellow_seconds <= 0 or all_red_seconds <= 0:
+        intervals = (min_green_seconds, yellow_seconds, all_red_seconds)
+        if any(not math.isfinite(value) or value <= 0 for value in intervals):
             raise ValueError("all FSM timing intervals must be greater than zero")
         self.min_green_seconds = min_green_seconds
         self.yellow_seconds = yellow_seconds
         self.all_red_seconds = all_red_seconds
         self._clock = clock
         self.phase = Phase.ALL_RED
-        self._phase_started_at = clock()
+        started_at = clock()
+        if not math.isfinite(started_at):
+            raise ValueError("clock must return a finite monotonic time")
+        self._phase_started_at = started_at
+        self._last_tick_at = started_at
         self._requested_green: Phase | None = None
 
     def request_phase(self, phase: Phase | str) -> None:
@@ -44,6 +50,9 @@ class SafetyFSM:
 
     def tick(self, now: float | None = None) -> Phase:
         current_time = self._clock() if now is None else now
+        if not math.isfinite(current_time) or current_time < self._last_tick_at:
+            raise ValueError("tick time must be finite and monotonic")
+        self._last_tick_at = current_time
         elapsed = current_time - self._phase_started_at
         next_phase: Phase | None = None
 
