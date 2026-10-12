@@ -129,3 +129,32 @@ def test_equal_demand_request_keeps_current_green(clock):
     fsm.request_phase(Phase.NS_GREEN)
     clock.advance(5.0)
     assert fsm.tick() is Phase.NS_GREEN
+
+
+def test_emergency_request_switches_at_minimum_green_not_before(clock):
+    fsm = SafetyFSM(3.0, 0.5, 0.25, clock=clock)
+    fsm.request_phase(Phase.NS_GREEN)
+    clock.advance(0.25)
+    assert fsm.tick() is Phase.NS_GREEN
+
+    fsm.request_phase(Phase.EW_GREEN, emergency=True)
+    clock.advance(2.99)
+    assert fsm.tick() is Phase.NS_GREEN
+    clock.advance(0.01)
+    assert fsm.tick() is Phase.NS_YELLOW
+
+
+def test_max_green_forces_and_retains_opposing_phase_through_clearance(clock):
+    fsm = SafetyFSM(1.0, 0.5, 0.25, clock=clock, max_green_seconds=2.0)
+    fsm.request_phase(Phase.NS_GREEN)
+    clock.advance(0.25)
+    assert fsm.tick() is Phase.NS_GREEN
+
+    clock.advance(2.0)
+    assert fsm.tick() is Phase.NS_YELLOW
+    fsm.request_phase(Phase.NS_GREEN)  # Equal demand must not cancel the forced handoff.
+    clock.advance(0.5)
+    assert fsm.tick() is Phase.ALL_RED
+    fsm.request_phase(Phase.NS_GREEN)
+    clock.advance(0.25)
+    assert fsm.tick() is Phase.EW_GREEN

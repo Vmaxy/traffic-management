@@ -36,11 +36,12 @@ class Settings:
     video_source: int | str = 0
     roi_config: Path = PROJECT_ROOT / "config" / "intersection_rois.json"
     model_path: str = "yolov8n.pt"
-    confidence_threshold: float = 0.35
+    confidence_threshold: float = 0.20
     serial_port: str | None = None
     serial_baud: int = 9600
     camera_retry_seconds: float = 2.0
-    min_green_seconds: float = 4.0
+    min_green_seconds: float = 3.0
+    max_green_seconds: float = 30.0
     yellow_seconds: float = 2.0
     all_red_seconds: float = 1.0
     heartbeat_seconds: float = 1.0
@@ -55,7 +56,7 @@ class Settings:
         if not roi_path.is_absolute():
             roi_path = PROJECT_ROOT / roi_path
 
-        confidence_raw = os.getenv("TRAFFIC_CONFIDENCE", "0.35")
+        confidence_raw = os.getenv("TRAFFIC_CONFIDENCE", "0.20")
         try:
             confidence = float(confidence_raw)
         except ValueError as exc:
@@ -72,10 +73,15 @@ class Settings:
             raise ValueError("TRAFFIC_SERIAL_BAUD must be greater than zero")
 
         heartbeat = _positive_float("TRAFFIC_HEARTBEAT_SECONDS", 1.0)
-        if heartbeat >= 2.5:
+        if heartbeat >= 3.0:
             raise ValueError(
-                "TRAFFIC_HEARTBEAT_SECONDS must be less than the 2.5-second Arduino watchdog"
+                "TRAFFIC_HEARTBEAT_SECONDS must be less than the 3-second Arduino watchdog"
             )
+
+        min_green = _positive_float("TRAFFIC_MIN_GREEN_SECONDS", 3.0)
+        max_green = _positive_float("TRAFFIC_MAX_GREEN_SECONDS", 30.0)
+        if max_green < min_green:
+            raise ValueError("TRAFFIC_MAX_GREEN_SECONDS must be at least TRAFFIC_MIN_GREEN_SECONDS")
 
         serial_port = os.getenv("TRAFFIC_SERIAL_PORT", "").strip() or None
         log_level = os.getenv("TRAFFIC_LOG_LEVEL", "INFO").upper()
@@ -90,7 +96,8 @@ class Settings:
             serial_port=serial_port,
             serial_baud=baud,
             camera_retry_seconds=_positive_float("TRAFFIC_CAMERA_RETRY_SECONDS", 2.0),
-            min_green_seconds=_positive_float("TRAFFIC_MIN_GREEN_SECONDS", 4.0),
+            min_green_seconds=min_green,
+            max_green_seconds=max_green,
             yellow_seconds=_positive_float("TRAFFIC_YELLOW_SECONDS", 2.0),
             all_red_seconds=_positive_float("TRAFFIC_ALL_RED_SECONDS", 1.0),
             heartbeat_seconds=heartbeat,

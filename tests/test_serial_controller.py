@@ -15,6 +15,7 @@ class FakeSerial:
         self.write_event = threading.Event()
         self.closed = False
         self.lock = threading.Lock()
+        self.incoming = bytearray()
 
     def write(self, data: bytes) -> int:
         with self.lock:
@@ -24,6 +25,24 @@ class FakeSerial:
 
     def close(self) -> None:
         self.closed = True
+
+    def flush(self) -> None:
+        pass
+
+    @property
+    def in_waiting(self) -> int:
+        with self.lock:
+            return len(self.incoming)
+
+    def read(self, size: int) -> bytes:
+        with self.lock:
+            result = bytes(self.incoming[:size])
+            del self.incoming[:size]
+            return result
+
+    def send_feedback(self, data: bytes) -> None:
+        with self.lock:
+            self.incoming.extend(data)
 
     def count(self, command: bytes) -> int:
         with self.lock:
@@ -88,7 +107,31 @@ def test_phase_update_is_non_blocking_when_serial_open_is_slow():
         controller.shutdown()
 
 
-@pytest.mark.parametrize("heartbeat", [2.5, 3.0])
+def test_reads_newline_framed_acknowledgments_without_blocking():
+    fake_serial = FakeSerial()
+    controller = ArduinoSerialController(
+        port="fake",
+        heartbeat_seconds=0.1,
+        reconnect_seconds=0.05,
+        serial_factory=lambda **_: fake_serial,
+    )
+    try:
+        assert wait_until(lambda: controller.status == "CONNECTED")
+        fake_serial.send_feedback(b"ACK:NS_G\r\n")
+        assert wait_until(lambda: controller.pop_acknowledgments() == ["ACK:NS_G"])
+    finally:
+        controller.shutdown()
+
+
+def test_phase_commands_are_compact_and_newline_delimited():
+    assert PHASE_COMMANDS[Phase.NS_GREEN] == "NS_G\n"
+    assert PHASE_COMMANDS[Phase.NS_YELLOW] == "NS_Y\n"
+    assert PHASE_COMMANDS[Phase.EW_GREEN] == "EW_G\n"
+    assert PHASE_COMMANDS[Phase.EW_YELLOW] == "EW_Y\n"
+    assert PHASE_COMMANDS[Phase.ALL_RED] == "ALL_R\n"
+
+
+@pytest.mark.parametrize("heartbeat", [3.0, 4.0])
 def test_heartbeat_must_precede_hardware_watchdog(heartbeat):
-    with pytest.raises(ValueError, match="2.5-second watchdog"):
+    with pytest.raises(ValueError, match="3-second watchdog"):
         ArduinoSerialController(heartbeat_seconds=heartbeat)

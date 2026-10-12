@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -76,3 +77,30 @@ def test_polygons_property_does_not_allow_mutating_internal_rois(roi_manager):
     polygons = roi_manager.polygons
     polygons["NORTH"][:] = 0
     assert roi_manager.assign_box((480, 100, 520, 200)) == "NORTH"
+
+
+def test_scales_reference_resolution_and_reports_emergency_lane(tmp_path):
+    config = {
+        "reference_resolution": {"width": 640, "height": 480},
+        "lanes": {
+            "NORTH": [[0, 0], [320, 0], [320, 240], [0, 240]],
+            "SOUTH": [[0, 240], [320, 240], [320, 480], [0, 480]],
+            "EAST": [[320, 0], [640, 0], [640, 240], [320, 240]],
+            "WEST": [[320, 240], [640, 240], [640, 480], [320, 480]],
+        },
+    }
+    path = tmp_path / "reference_rois.json"
+    path.write_text(json.dumps(config), encoding="utf-8")
+    manager = ROIManager(path)
+    manager.update_resolution(1280, 960)
+
+    occupancy = manager.count_detections(
+        [
+            SimpleNamespace(box=(400, 100, 440, 220), is_emergency=True),
+            SimpleNamespace(box=(900, 100, 940, 220), is_emergency=False),
+        ]
+    )
+    assert occupancy.counts["NORTH"] == 1
+    assert occupancy.counts["EAST"] == 1
+    assert occupancy.emergency_lanes == frozenset({"NORTH"})
+    assert occupancy.assigned_lanes == ("NORTH", "EAST")

@@ -1,4 +1,4 @@
-"""Background-threaded, non-blocking Arduino phase sender."""
+"""Background-threaded, non-blocking Arduino phase sender and ACK reader."""
 
 from __future__ import annotations
 
@@ -11,14 +11,14 @@ from traffic_core.safety_fsm import Phase
 
 
 LOGGER = logging.getLogger(__name__)
-ARDUINO_WATCHDOG_SECONDS = 2.5
+ARDUINO_WATCHDOG_SECONDS = 3.0
 
 PHASE_COMMANDS = {
-    Phase.ALL_RED: "SET_PHASE:ALL_RED\n",
-    Phase.NS_GREEN: "SET_PHASE:NS_GREEN\n",
-    Phase.NS_YELLOW: "SET_PHASE:NS_YELLOW\n",
-    Phase.EW_GREEN: "SET_PHASE:EW_GREEN\n",
-    Phase.EW_YELLOW: "SET_PHASE:EW_YELLOW\n",
+    Phase.ALL_RED: "ALL_R\n",
+    Phase.NS_GREEN: "NS_G\n",
+    Phase.NS_YELLOW: "NS_Y\n",
+    Phase.EW_GREEN: "EW_G\n",
+    Phase.EW_YELLOW: "EW_Y\n",
 }
 
 
@@ -31,11 +31,7 @@ class ArduinoController:
         reconnect_seconds: float = 2.0,
         serial_factory: Callable[..., object] | None = None,
     ) -> None:
-        if (
-            baud_rate <= 0
-            or heartbeat_seconds <= 0
-            or reconnect_seconds <= 0
-        ):
+        if baud_rate <= 0 or heartbeat_seconds <= 0 or reconnect_seconds <= 0:
             raise ValueError("baud rate and serial intervals must be greater than zero")
         if heartbeat_seconds >= ARDUINO_WATCHDOG_SECONDS:
             raise ValueError(
@@ -54,6 +50,9 @@ class ArduinoController:
         self._force_reconnect = threading.Event()
         self._all_red_attempted = threading.Event()
         self._status_lock = threading.Lock()
+        self._ack_lock = threading.Lock()
+        self._acknowledgments: list[str] = []
+        self._receive_buffer = bytearray()
         self._connected = False
         self._warned_unavailable = False
         self._thread = threading.Thread(target=self._run, name="arduino-serial", daemon=True)
@@ -63,6 +62,12 @@ class ArduinoController:
     def status(self) -> str:
         with self._status_lock:
             return "CONNECTED" if self._connected else "SIMULATION (not connected)"
+
+    def pop_acknowledgments(self) -> list[str]:
+        """Return received ACK/error lines without waiting for serial I/O."""
+        with self._ack_lock:
+            acknowledgments, self._acknowledgments = self._acknowledgments, []
+        return acknowledgments
 
     def set_phase(self, phase: Phase | str) -> None:
         try:
@@ -114,10 +119,7 @@ class ArduinoController:
                     port = candidates[0]
                     LOGGER.info("Auto-detected Arduino-compatible serial port %s", port)
                 elif len(candidates) > 1:
-                    LOGGER.debug(
-                        "Multiple Arduino-compatible ports found (%s)",
-                        ", ".join(candidates),
-                    )
+                    LOGGER.debug("Multiple Arduino-compatible ports found (%s)", ", ".join(candidates))
                     return None
                 else:
                     return None
@@ -128,6 +130,23 @@ class ArduinoController:
             LOGGER.debug("Unable to connect to Arduino serial port: %s", exc)
         return None
 
+    def _read_feedback(self, connection: object) -> None:
+        """Drain only bytes already buffered by pyserial; never wait for a line."""
+        available = int(getattr(connection, "in_waiting", 0))
+        if available <= 0:
+            return
+        data = connection.read(available)
+        if not data:
+            return
+        self._receive_buffer.extend(data)
+        while b"\n" in self._receive_buffer:
+            line, _, remainder = self._receive_buffer.partition(b"\n")
+            self._receive_buffer = bytearray(remainder)
+            decoded = line.decode("utf-8", errors="replace").strip("\r ")
+            if decoded:
+                with self._ack_lock:
+                    self._acknowledgments.append(decoded)
+
     def _run(self) -> None:
         connection: object | None = None
         last_attempt = 0.0
@@ -136,10 +155,22 @@ class ArduinoController:
         last_simulated_phase: Phase | None = None
 
         while not self._stop.is_set():
-            self._wake.wait(timeout=0.2)
+            self._wake.wait(timeout=0.05)
             self._wake.clear()
             if self._stop.is_set():
                 break
+
+            if connection is not None:
+                try:
+                    self._read_feedback(connection)
+                except (OSError, ValueError, AttributeError) as exc:
+                    LOGGER.warning("Arduino serial read failed; reconnecting: %s", exc)
+                    self._close_connection(connection)
+                    connection = None
+                    self._set_connected(False)
+                    last_attempt = time.monotonic()
+                    last_sent_phase = None
+                    continue
 
             with self._desired_lock:
                 desired = self._desired_phase
@@ -166,6 +197,7 @@ class ArduinoController:
                         last_simulated_phase = desired
                 else:
                     self._warned_unavailable = False
+                    self._receive_buffer.clear()
                 if connection is None and desired is Phase.ALL_RED and self._force_reconnect.is_set():
                     self._all_red_attempted.set()
 
@@ -173,9 +205,11 @@ class ArduinoController:
                 continue
 
             try:
-                written = connection.write(PHASE_COMMANDS[desired].encode("ascii"))
-                if written != len(PHASE_COMMANDS[desired]):
+                payload = PHASE_COMMANDS[desired].encode("utf-8")
+                written = connection.write(payload)
+                if written != len(payload):
                     raise OSError(f"short serial write ({written} bytes)")
+                connection.flush()
             except (OSError, ValueError, AttributeError) as exc:
                 LOGGER.warning("Arduino serial write failed; switching to simulation mode: %s", exc)
                 self._close_connection(connection)
@@ -191,8 +225,6 @@ class ArduinoController:
             last_simulated_phase = None
             if desired is Phase.ALL_RED and self._force_reconnect.is_set():
                 self._all_red_attempted.set()
-            if self._stop.is_set():
-                break
 
         if connection is not None:
             self._close_connection(connection)

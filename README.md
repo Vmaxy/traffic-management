@@ -1,6 +1,6 @@
 # AI Miniature Traffic Management System
 
-The Python application reads an overhead camera stream, detects COCO vehicle classes with Ultralytics YOLO, counts detections in four approach regions, and selects conflict-free traffic phases. An Arduino Uno/Nano drives the 12 signal LEDs. The Python FSM enforces minimum green, yellow, and all-red clearance; the Arduino independently returns to all-red if it receives no command for 2.5 seconds.
+The Python application reads an overhead camera stream, detects COCO car, bus, and truck classes with Ultralytics YOLO, counts detections in four approach regions, and selects conflict-free traffic phases. Red-and-white vehicle appearance and high-confidence bus/truck matches flag likely toy ambulances. An Arduino Uno/Nano drives the 12 signal LEDs. Python sends newline-delimited `NS_G`, `NS_Y`, `EW_G`, `EW_Y`, and `ALL_R` commands; Arduino acknowledges each phase and independently returns to all-red if it receives no valid command for 3 seconds.
 
 ## Setup
 
@@ -21,15 +21,16 @@ All settings are optional environment variables:
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `TRAFFIC_VIDEO_SOURCE` | `0` | Webcam index or camera stream URL, such as an HTTP/MJPEG URL |
-| `TRAFFIC_ROI_CONFIG` | `config/intersection_rois.json` | Path to normalized lane polygons |
+| `TRAFFIC_ROI_CONFIG` | `config/intersection_rois.json` | Path to lane polygons in the file's reference resolution |
 | `TRAFFIC_MODEL` | `yolov8n.pt` | Ultralytics model path/name |
-| `TRAFFIC_CONFIDENCE` | `0.35` | Detection confidence threshold, greater than 0 and at most 1 |
+| `TRAFFIC_CONFIDENCE` | `0.20` | Detection confidence threshold, greater than 0 and at most 1 |
 | `TRAFFIC_SERIAL_PORT` | auto-detect | Arduino serial port; set explicitly if multiple USB serial devices are attached |
 | `TRAFFIC_SERIAL_BAUD` | `9600` | Serial baud rate (must match the firmware) |
-| `TRAFFIC_MIN_GREEN_SECONDS` | `4.0` | Minimum green duration |
+| `TRAFFIC_MIN_GREEN_SECONDS` | `3.0` | Minimum green duration, including emergency priority clearance |
+| `TRAFFIC_MAX_GREEN_SECONDS` | `30.0` | Maximum green duration before fair handoff to the opposing approach |
 | `TRAFFIC_YELLOW_SECONDS` | `2.0` | Yellow clearance duration |
 | `TRAFFIC_ALL_RED_SECONDS` | `1.0` | All-red clearance duration |
-| `TRAFFIC_HEARTBEAT_SECONDS` | `1.0` | Current-phase resend interval; must remain below the Arduino's 2.5-second watchdog |
+| `TRAFFIC_HEARTBEAT_SECONDS` | `1.0` | Current-phase resend interval; must remain below the Arduino's 3-second watchdog |
 | `TRAFFIC_CAMERA_RETRY_SECONDS` | `2.0` | Delay between camera reconnection attempts |
 | `TRAFFIC_LOG_LEVEL` | `INFO` | Python log level |
 
@@ -37,6 +38,6 @@ For example, set `TRAFFIC_VIDEO_SOURCE` to the local stream URL and `TRAFFIC_SER
 
 ## Camera ROI calibration
 
-The included `config/intersection_rois.json` contains normalized **example** polygons, not camera-calibrated measurements. Image coordinates use `(0, 0)` at the top-left and `(1, 1)` at the bottom-right. Edit all four polygons to cover the corresponding approaches in your camera view. Keep them outside the central junction; vehicle detections whose bottom-center falls outside every polygon are unassigned. The example assumes NORTH is at the top of the displayed frame, SOUTH at the bottom, EAST on the right, and WEST on the left. Verify the lane labels and counts against the physical model before connecting live signals.
+The included `config/intersection_rois.json` contains **example** polygons, not camera-calibrated measurements. Polygons are pixel coordinates inside `lanes`, drawn at the `reference_resolution` width and height; the application scales them independently to each camera frame. Edit all four polygons to cover the corresponding approaches in your camera view. Keep them outside the central junction; vehicle detections are assigned using the bounding-box bottom-center, and detections outside every polygon are unassigned. The example assumes NORTH is at the top of the displayed frame, SOUTH at the bottom, EAST on the right, and WEST on the left. Verify the lane labels and counts against the physical model before connecting live signals.
 
 Counts are the number of vehicle detections assigned to each ROI in the current frame, not cumulative trip counts or tracked identities.

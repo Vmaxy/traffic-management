@@ -1,8 +1,9 @@
-"""Normalized approach polygons and vehicle-to-lane assignment."""
+"""Reference-resolution approach polygons and vehicle-to-lane assignment."""
 
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -14,36 +15,70 @@ LANES = ("NORTH", "SOUTH", "EAST", "WEST")
 Box = Sequence[float]
 
 
+@dataclass(frozen=True)
+class LaneOccupancy:
+    counts: Mapping[str, int]
+    emergency_lanes: frozenset[str]
+    assigned_lanes: tuple[str | None, ...]
+
+
 class ROIManager:
     def __init__(self, config_path: str | Path) -> None:
         self.config_path = Path(config_path)
         try:
             with self.config_path.open("r", encoding="utf-8") as config_file:
-                raw_rois = json.load(config_file)
+                raw_config = json.load(config_file)
         except OSError as exc:
             raise OSError(f"Unable to read ROI configuration {self.config_path}: {exc}") from exc
         except json.JSONDecodeError as exc:
             raise ValueError(f"Invalid JSON in ROI configuration {self.config_path}: {exc}") from exc
 
-        if not isinstance(raw_rois, dict):
-            raise ValueError("ROI configuration must be a JSON object keyed by lane name")
+        if not isinstance(raw_config, dict):
+            raise ValueError("ROI configuration must be a JSON object")
 
-        self._normalized: dict[str, np.ndarray] = {}
+        # Legacy lane maps use normalized coordinates; the current format stores
+        # pixel coordinates together with the dimensions they were drawn against.
+        self._normalized_coordinates = "lanes" not in raw_config and "reference_resolution" not in raw_config
+        raw_rois = raw_config.get("lanes", raw_config)
+        if not isinstance(raw_rois, dict):
+            raise ValueError("ROI lanes must be a JSON object keyed by lane name")
+
+        self._reference_width = 1.0
+        self._reference_height = 1.0
+        if not self._normalized_coordinates:
+            resolution = raw_config.get("reference_resolution")
+            if not isinstance(resolution, dict):
+                raise ValueError("reference_resolution must contain width and height")
+            try:
+                self._reference_width = float(resolution["width"])
+                self._reference_height = float(resolution["height"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError("reference_resolution width and height must be positive numbers") from exc
+            if (
+                not np.isfinite([self._reference_width, self._reference_height]).all()
+                or self._reference_width <= 0
+                or self._reference_height <= 0
+            ):
+                raise ValueError("reference_resolution width and height must be positive numbers")
+
+        self._reference_polygons: dict[str, np.ndarray] = {}
         for lane in LANES:
             points = raw_rois.get(lane)
             if not isinstance(points, list) or len(points) < 3:
-                raise ValueError(f"ROI {lane} must contain at least three normalized points")
+                raise ValueError(f"ROI {lane} must contain at least three points")
             try:
                 polygon = np.asarray(points, dtype=np.float32)
             except (TypeError, ValueError) as exc:
                 raise ValueError(f"ROI {lane} points must be numeric coordinate pairs") from exc
             if polygon.ndim != 2 or polygon.shape[1] != 2:
                 raise ValueError(f"ROI {lane} points must each contain exactly two coordinates")
-            if not np.isfinite(polygon).all() or ((polygon < 0.0) | (polygon > 1.0)).any():
-                raise ValueError(f"ROI {lane} coordinates must be finite and between 0.0 and 1.0")
+            if not np.isfinite(polygon).all():
+                raise ValueError(f"ROI {lane} coordinates must be finite")
+            if self._normalized_coordinates and ((polygon < 0.0) | (polygon > 1.0)).any():
+                raise ValueError(f"ROI {lane} normalized coordinates must be between 0.0 and 1.0")
             if cv2.contourArea(polygon) == 0:
                 raise ValueError(f"ROI {lane} must enclose a non-zero area")
-            self._normalized[lane] = polygon
+            self._reference_polygons[lane] = polygon
 
         self._width = 0
         self._height = 0
@@ -54,9 +89,16 @@ class ROIManager:
             raise ValueError("frame width and height must be greater than zero")
         self._width = width
         self._height = height
+        if self._normalized_coordinates:
+            scale = np.array([width - 1, height - 1], dtype=np.float32)
+        else:
+            scale = np.array(
+                [width / self._reference_width, height / self._reference_height],
+                dtype=np.float32,
+            )
         self._scaled = {
-            lane: np.rint(points * np.array([width - 1, height - 1])).astype(np.int32)
-            for lane, points in self._normalized.items()
+            lane: np.rint(points * scale).astype(np.int32)
+            for lane, points in self._reference_polygons.items()
         }
 
     @property
@@ -82,3 +124,18 @@ class ROIManager:
             if cv2.pointPolygonTest(self._scaled[lane], point, False) >= 0:
                 return lane
         return None
+
+    def count_detections(self, detections: Sequence[object]) -> LaneOccupancy:
+        """Count vehicles and retain lane assignments plus emergency approaches."""
+        counts = {lane: 0 for lane in LANES}
+        emergency_lanes: set[str] = set()
+        assigned_lanes: list[str | None] = []
+        for detection in detections:
+            lane = self.assign_box(getattr(detection, "box"))
+            assigned_lanes.append(lane)
+            if lane is None:
+                continue
+            counts[lane] += 1
+            if bool(getattr(detection, "is_emergency", False)):
+                emergency_lanes.add(lane)
+        return LaneOccupancy(counts, frozenset(emergency_lanes), tuple(assigned_lanes))
