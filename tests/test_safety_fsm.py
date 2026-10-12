@@ -51,7 +51,7 @@ def test_switches_ew_to_ns_through_ew_yellow_and_all_red(clock):
     assert fsm.tick() is Phase.NS_GREEN
 
 
-def test_green_demand_cannot_bypass_clearance_once_yellow_begins(clock):
+def test_green_target_is_latched_through_clearance(clock):
     fsm = SafetyFSM(1.0, 0.5, 0.25, clock=clock)
     fsm.request_phase(Phase.NS_GREEN)
     clock.advance(0.25)
@@ -64,7 +64,7 @@ def test_green_demand_cannot_bypass_clearance_once_yellow_begins(clock):
     clock.advance(0.5)
     assert fsm.tick() is Phase.ALL_RED
     clock.advance(0.25)
-    assert fsm.tick() is Phase.NS_GREEN
+    assert fsm.tick() is Phase.EW_GREEN
 
 
 def test_only_green_phases_can_be_requested(clock):
@@ -121,14 +121,37 @@ def test_never_enters_both_conflicting_green_phases(clock):
         clock.advance(0.5)
 
 
-def test_equal_demand_request_keeps_current_green(clock):
+def test_green_phase_ends_after_its_latched_duration(clock):
     fsm = SafetyFSM(1.0, 0.5, 0.25, clock=clock)
     fsm.request_phase(Phase.NS_GREEN)
     clock.advance(0.25)
     assert fsm.tick() is Phase.NS_GREEN
     fsm.request_phase(Phase.NS_GREEN)
     clock.advance(5.0)
+    assert fsm.tick() is Phase.NS_YELLOW
+
+
+def test_green_duration_is_clamped_and_latched_when_phase_starts(clock):
+    fsm = SafetyFSM(
+        min_green_seconds=2.0,
+        max_green_seconds=8.0,
+        yellow_seconds=1.0,
+        all_red_seconds=0.5,
+        clock=clock,
+    )
+    fsm.request_phase(Phase.NS_GREEN, green_seconds=50.0)
+    clock.advance(0.5)
     assert fsm.tick() is Phase.NS_GREEN
+    fsm.request_phase(Phase.EW_GREEN, green_seconds=4.0)
+    clock.advance(7.99)
+    assert fsm.tick() is Phase.NS_GREEN
+    clock.advance(0.01)
+    assert fsm.tick() is Phase.NS_YELLOW
+    fsm.request_phase(Phase.NS_GREEN, green_seconds=2.0)
+    clock.advance(1.0)
+    assert fsm.tick() is Phase.ALL_RED
+    clock.advance(0.5)
+    assert fsm.tick() is Phase.EW_GREEN
 
 
 def test_emergency_request_switches_at_minimum_green_not_before(clock):
@@ -146,7 +169,11 @@ def test_emergency_request_switches_at_minimum_green_not_before(clock):
 
 def test_max_green_forces_and_retains_opposing_phase_through_clearance(clock):
     fsm = SafetyFSM(1.0, 0.5, 0.25, clock=clock, max_green_seconds=2.0)
-    fsm.request_phase(Phase.NS_GREEN)
+    fsm.request_phase(
+        Phase.NS_GREEN,
+        green_seconds=2.0,
+        opposing_green_seconds=1.5,
+    )
     clock.advance(0.25)
     assert fsm.tick() is Phase.NS_GREEN
 
@@ -158,3 +185,7 @@ def test_max_green_forces_and_retains_opposing_phase_through_clearance(clock):
     fsm.request_phase(Phase.NS_GREEN)
     clock.advance(0.25)
     assert fsm.tick() is Phase.EW_GREEN
+    clock.advance(1.49)
+    assert fsm.tick() is Phase.EW_GREEN
+    clock.advance(0.01)
+    assert fsm.tick() is Phase.EW_YELLOW

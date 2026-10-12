@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import argparse
 import logging
 import sys
 import time
+from collections import deque
+from dataclasses import replace
 from pathlib import Path
+from statistics import fmean
+from typing import Sequence
 
 import cv2
 
@@ -33,6 +38,26 @@ PHASE_COLORS = {
     Phase.EW_YELLOW: (0, 220, 255),
     Phase.ALL_RED: (0, 0, 255),
 }
+DEMAND_SMOOTHING_FRAMES = 15
+
+
+def _parse_source(value: str) -> int | str:
+    candidate = Path(value).expanduser()
+    if candidate.is_file():
+        return str(candidate)
+    if value.isdecimal():
+        return int(value)
+    return value
+
+
+def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="AI miniature traffic management system")
+    parser.add_argument(
+        "--source",
+        type=_parse_source,
+        help="video file path, IP/RTSP URL, or webcam index (default: configured source)",
+    )
+    return parser.parse_args(argv)
 
 
 def _configure_logging(level: str) -> None:
@@ -113,17 +138,25 @@ def _draw_hud(
         )
 
 
-def run() -> None:
+def run(argv: Sequence[str] | None = None) -> None:
+    args = _parse_args(argv)
     settings = Settings.from_env()
+    if args.source is not None:
+        settings = replace(settings, video_source=args.source)
     _configure_logging(settings.log_level)
     logger = logging.getLogger("traffic_system")
 
     roi_manager = ROIManager(settings.roi_config)
-    camera = CameraStream(settings.video_source, settings.camera_retry_seconds)
+    camera = CameraStream(
+        settings.video_source,
+        settings.camera_retry_seconds,
+        max_fps=settings.max_video_fps,
+    )
     controller = ArduinoController(
         port=settings.serial_port,
         baud_rate=settings.serial_baud,
         heartbeat_seconds=settings.heartbeat_seconds,
+        min_green_seconds=settings.min_green_seconds,
     )
     fsm = SafetyFSM(
         min_green_seconds=settings.min_green_seconds,
@@ -133,7 +166,9 @@ def run() -> None:
     )
     requested_phase = Phase.NS_GREEN
     fsm.request_phase(requested_phase)
-    controller.set_phase(fsm.phase)
+    lane_durations = {lane: settings.min_green_seconds for lane in LANES}
+    controller.set_plan(requested_phase, lane_durations)
+    demand_history: deque[dict[str, float]] = deque(maxlen=DEMAND_SMOOTHING_FRAMES)
 
     try:
         detector = VehicleDetector(settings.model_path, settings.confidence_threshold)
@@ -149,9 +184,27 @@ def run() -> None:
             detections = detector.detect(frame)
             occupancy = roi_manager.count_detections(detections)
             counts = occupancy.counts
+            demand_history.append({lane: float(counts[lane]) for lane in LANES})
+            smoothed_counts = {
+                lane: fmean(sample[lane] for sample in demand_history)
+                for lane in LANES
+            }
+            lane_durations = {
+                lane: min(
+                    settings.max_green_seconds,
+                    max(
+                        settings.min_green_seconds,
+                        settings.min_green_seconds
+                        + smoothed_counts[lane] * settings.green_scale_factor,
+                    ),
+                )
+                for lane in LANES
+            }
 
-            ns_demand = counts["NORTH"] + counts["SOUTH"]
-            ew_demand = counts["EAST"] + counts["WEST"]
+            ns_demand = smoothed_counts["NORTH"] + smoothed_counts["SOUTH"]
+            ew_demand = smoothed_counts["EAST"] + smoothed_counts["WEST"]
+            ns_green_seconds = max(lane_durations["NORTH"], lane_durations["SOUTH"])
+            ew_green_seconds = max(lane_durations["EAST"], lane_durations["WEST"])
             emergency_ns = bool({"NORTH", "SOUTH"} & occupancy.emergency_lanes)
             emergency_ew = bool({"EAST", "WEST"} & occupancy.emergency_lanes)
 
@@ -180,12 +233,42 @@ def run() -> None:
                 (requested_phase is Phase.NS_GREEN and emergency_ns and active_direction is Phase.EW_GREEN)
                 or (requested_phase is Phase.EW_GREEN and emergency_ew and active_direction is Phase.NS_GREEN)
             )
-            fsm.request_phase(requested_phase, emergency=emergency_priority)
+            selected_green_seconds = (
+                ns_green_seconds
+                if requested_phase is Phase.NS_GREEN
+                else ew_green_seconds
+            )
+            fsm.request_phase(
+                requested_phase,
+                emergency=emergency_priority,
+                green_seconds=selected_green_seconds,
+                opposing_green_seconds=(
+                    ew_green_seconds
+                    if active_direction is Phase.NS_GREEN
+                    else ns_green_seconds
+                    if active_direction is Phase.EW_GREEN
+                    else selected_green_seconds
+                ),
+            )
+            emergency_interrupt = (
+                emergency_priority
+                and fsm.elapsed_seconds >= settings.min_green_seconds
+            )
             previous_phase = fsm.phase
             active_phase = fsm.tick()
             if active_phase is not previous_phase:
                 logger.info("Signal phase changed to %s", active_phase.value)
-                controller.set_phase(active_phase)
+            if active_phase in (
+                Phase.NS_GREEN,
+                Phase.NS_YELLOW,
+                Phase.EW_GREEN,
+                Phase.EW_YELLOW,
+            ):
+                controller.set_plan(
+                    requested_phase,
+                    lane_durations,
+                    emergency=emergency_interrupt,
+                )
 
             acknowledgments = controller.pop_acknowledgments()
             emergency_lanes = ",".join(sorted(occupancy.emergency_lanes)) or "none"

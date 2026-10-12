@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
-from typing import Callable
+from typing import Callable, Mapping
 
 from traffic_core.safety_fsm import Phase
 
 
 LOGGER = logging.getLogger(__name__)
-ARDUINO_WATCHDOG_SECONDS = 3.0
+ARDUINO_WATCHDOG_SECONDS = 10.0
+MIN_PLAN_UPDATE_SECONDS = 0.5
 
 PHASE_COMMANDS = {
     Phase.ALL_RED: "ALL_R\n",
@@ -20,6 +22,8 @@ PHASE_COMMANDS = {
     Phase.EW_GREEN: "EW_G\n",
     Phase.EW_YELLOW: "EW_Y\n",
 }
+LANES = ("NORTH", "SOUTH", "EAST", "WEST")
+WIRE_LANES = {"NORTH": "N", "SOUTH": "S", "EAST": "E", "WEST": "W"}
 
 
 class ArduinoController:
@@ -30,6 +34,7 @@ class ArduinoController:
         heartbeat_seconds: float = 1.0,
         reconnect_seconds: float = 2.0,
         serial_factory: Callable[..., object] | None = None,
+        min_green_seconds: float = 3.0,
     ) -> None:
         if baud_rate <= 0 or heartbeat_seconds <= 0 or reconnect_seconds <= 0:
             raise ValueError("baud rate and serial intervals must be greater than zero")
@@ -38,12 +43,16 @@ class ArduinoController:
                 "heartbeat_seconds must be less than the Arduino's "
                 f"{ARDUINO_WATCHDOG_SECONDS:g}-second watchdog"
             )
+        if not math.isfinite(min_green_seconds) or min_green_seconds <= 0:
+            raise ValueError("min_green_seconds must be greater than zero")
         self.port = port
         self.baud_rate = baud_rate
         self.heartbeat_seconds = heartbeat_seconds
         self.reconnect_seconds = reconnect_seconds
         self._serial_factory = serial_factory
         self._desired_phase = Phase.ALL_RED
+        self._desired_durations = {lane: min_green_seconds for lane in LANES}
+        self._emergency_priority = False
         self._desired_lock = threading.Lock()
         self._wake = threading.Event()
         self._stop = threading.Event()
@@ -77,6 +86,38 @@ class ArduinoController:
         with self._desired_lock:
             changed = requested is not self._desired_phase
             self._desired_phase = requested
+        if changed:
+            self._wake.set()
+
+    def set_plan(
+        self,
+        phase: Phase | str,
+        lane_durations: Mapping[str, float],
+        emergency: bool = False,
+    ) -> None:
+        try:
+            requested = phase if isinstance(phase, Phase) else Phase(phase)
+        except ValueError as exc:
+            raise ValueError(f"Unknown traffic phase: {phase!r}") from exc
+        if requested not in (Phase.NS_GREEN, Phase.EW_GREEN):
+            raise ValueError("A signal plan must request NS_GREEN or EW_GREEN")
+        if set(lane_durations) != set(LANES):
+            raise ValueError("lane_durations must contain exactly N, S, E, and W")
+        durations = {}
+        for lane in LANES:
+            value = lane_durations[lane]
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"duration for lane {lane} must be finite and greater than zero")
+            durations[lane] = round(value, 1)
+        with self._desired_lock:
+            changed = (
+                requested is not self._desired_phase
+                or durations != self._desired_durations
+                or bool(emergency) != self._emergency_priority
+            )
+            self._desired_phase = requested
+            self._desired_durations = durations
+            self._emergency_priority = bool(emergency)
         if changed:
             self._wake.set()
 
@@ -123,7 +164,14 @@ class ArduinoController:
                     return None
                 else:
                     return None
-            return serial.Serial(port=port, baudrate=self.baud_rate, timeout=0, write_timeout=0)
+            connection = serial.Serial(
+                port=port,
+                baudrate=self.baud_rate,
+                timeout=0,
+                write_timeout=0,
+            )
+            time.sleep(2.0)
+            return connection
         except ImportError:
             LOGGER.debug("pyserial is unavailable")
         except (OSError, ValueError) as exc:
@@ -150,7 +198,7 @@ class ArduinoController:
     def _run(self) -> None:
         connection: object | None = None
         last_attempt = 0.0
-        last_sent_phase: Phase | None = None
+        last_sent_payloads: tuple[bytes, ...] | None = None
         last_sent_at = 0.0
         last_simulated_phase: Phase | None = None
 
@@ -169,15 +217,33 @@ class ArduinoController:
                     connection = None
                     self._set_connected(False)
                     last_attempt = time.monotonic()
-                    last_sent_phase = None
                     continue
 
             with self._desired_lock:
                 desired = self._desired_phase
+                durations = dict(self._desired_durations)
+                emergency = self._emergency_priority
+            target = "NS" if desired is Phase.NS_GREEN else "EW"
+            payloads = (
+                (b"SAFE:RED\n",)
+                if desired is Phase.ALL_RED
+                else tuple(
+                    f"SET:{WIRE_LANES[lane]}:{durations[lane]:.2f}\n".encode("ascii")
+                    for lane in LANES
+                )
+                + (f"NEXT:{target}\n".encode("ascii"),)
+                + ((f"PRIORITY:{target}\n".encode("ascii"),) if emergency else ())
+            )
             now = time.monotonic()
-            if desired is last_sent_phase and now - last_sent_at < self.heartbeat_seconds:
+            if payloads == last_sent_payloads and now - last_sent_at < self.heartbeat_seconds:
                 if desired is Phase.ALL_RED and self._force_reconnect.is_set():
                     self._all_red_attempted.set()
+                continue
+            if (
+                payloads != last_sent_payloads
+                and last_sent_payloads is not None
+                and now - last_sent_at < MIN_PLAN_UPDATE_SECONDS
+            ):
                 continue
 
             if connection is None and (
@@ -205,10 +271,10 @@ class ArduinoController:
                 continue
 
             try:
-                payload = PHASE_COMMANDS[desired].encode("utf-8")
-                written = connection.write(payload)
-                if written != len(payload):
-                    raise OSError(f"short serial write ({written} bytes)")
+                for payload in payloads:
+                    written = connection.write(payload)
+                    if written != len(payload):
+                        raise OSError(f"short serial write ({written} bytes)")
                 connection.flush()
             except (OSError, ValueError, AttributeError) as exc:
                 LOGGER.warning("Arduino serial write failed; switching to simulation mode: %s", exc)
@@ -216,11 +282,10 @@ class ArduinoController:
                 connection = None
                 self._set_connected(False)
                 last_attempt = time.monotonic()
-                last_sent_phase = None
                 continue
 
-            LOGGER.debug("Sent phase %s to Arduino", desired.value)
-            last_sent_phase = desired
+            LOGGER.debug("Sent %s signal plan to Arduino", target)
+            last_sent_payloads = payloads
             last_sent_at = time.monotonic()
             last_simulated_phase = None
             if desired is Phase.ALL_RED and self._force_reconnect.is_set():

@@ -1,8 +1,14 @@
+#include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
-const unsigned long WATCHDOG_TIMEOUT_MS = 3000UL;
+const unsigned long WATCHDOG_TIMEOUT_MS = 10000UL;
+const unsigned long YELLOW_DURATION_MS = 3000UL;
+const unsigned long ALL_RED_DURATION_MS = 1500UL;
 const unsigned long SERIAL_BAUD_RATE = 9600UL;
-const uint8_t COMMAND_BUFFER_SIZE = 16;
+const uint8_t COMMAND_BUFFER_SIZE = 32;
+const uint16_t MIN_GREEN_SECONDS = 3;
+const uint16_t MAX_GREEN_SECONDS = 30;
 
 struct SignalPins {
   uint8_t red;
@@ -10,7 +16,6 @@ struct SignalPins {
   uint8_t green;
 };
 
-// Each road approach has its own three LEDs; opposing approaches share a phase.
 const SignalPins NORTH = {2, 3, 4};
 const SignalPins SOUTH = {5, 6, 7};
 const SignalPins EAST = {8, 9, 10};
@@ -25,8 +30,15 @@ enum SignalPhase {
 };
 
 SignalPhase currentPhase = PHASE_ALL_RED;
-unsigned long lastCommandMs = 0;
+SignalPhase requestedGreen = PHASE_NS_GREEN;
+SignalPhase latchedNextGreen = PHASE_NS_GREEN;
+unsigned long phaseStartedMs = 0;
+unsigned long lastValidCommandMs = 0;
+unsigned long activeGreenMs = 5000UL;
+unsigned long laneGreenMs[4] = {5000UL, 5000UL, 5000UL, 5000UL};
 bool watchdogTriggered = false;
+bool cycleStarted = false;
+bool planReceived = false;
 char commandBuffer[COMMAND_BUFFER_SIZE];
 uint8_t commandLength = 0;
 bool discardingCommand = false;
@@ -38,7 +50,6 @@ void setDirection(const SignalPins &pins, bool red, bool yellow, bool green) {
 }
 
 void applyPhase(SignalPhase phase) {
-  // Start from all-red so no transition can momentarily show conflicting greens.
   setDirection(NORTH, true, false, false);
   setDirection(SOUTH, true, false, false);
   setDirection(EAST, true, false, false);
@@ -57,121 +68,148 @@ void applyPhase(SignalPhase phase) {
     setDirection(EAST, false, true, false);
     setDirection(WEST, false, true, false);
   }
+
   currentPhase = phase;
+  phaseStartedMs = millis();
 }
 
-const char *phaseCommand(SignalPhase phase) {
-  switch (phase) {
-    case PHASE_NS_GREEN:
-      return "NS_G";
-    case PHASE_NS_YELLOW:
-      return "NS_Y";
-    case PHASE_EW_GREEN:
-      return "EW_G";
-    case PHASE_EW_YELLOW:
-      return "EW_Y";
-    case PHASE_ALL_RED:
-    default:
-      return "ALL_R";
+unsigned long boundedGreenMilliseconds(float value) {
+  if (!isfinite(value) || value < MIN_GREEN_SECONDS || value > MAX_GREEN_SECONDS) {
+    return 0;
   }
+  return static_cast<unsigned long>(value * 1000.0f + 0.5f);
 }
 
-bool parsePhase(const char *command, SignalPhase *phase) {
-  if (strcmp(command, "ALL_R") == 0) {
-    *phase = PHASE_ALL_RED;
-  } else if (strcmp(command, "NS_G") == 0) {
-    *phase = PHASE_NS_GREEN;
-  } else if (strcmp(command, "NS_Y") == 0) {
-    *phase = PHASE_NS_YELLOW;
-  } else if (strcmp(command, "EW_G") == 0) {
-    *phase = PHASE_EW_GREEN;
-  } else if (strcmp(command, "EW_Y") == 0) {
-    *phase = PHASE_EW_YELLOW;
+bool parseLane(const char *lane, uint8_t *index) {
+  if (strcmp(lane, "N") == 0) {
+    *index = 0;
+  } else if (strcmp(lane, "S") == 0) {
+    *index = 1;
+  } else if (strcmp(lane, "E") == 0) {
+    *index = 2;
+  } else if (strcmp(lane, "W") == 0) {
+    *index = 3;
   } else {
     return false;
   }
   return true;
 }
 
-void processCommand(const char *command) {
-  while (*command == ' ' || *command == '\t') {
-    ++command;
+SignalPhase parseTarget(const char *target) {
+  if (strcmp(target, "NS") == 0) {
+    return PHASE_NS_GREEN;
   }
-  size_t commandSize = strlen(command);
-  while (commandSize > 0 && (command[commandSize - 1] == ' ' || command[commandSize - 1] == '\t')) {
-    --commandSize;
+  if (strcmp(target, "EW") == 0) {
+    return PHASE_EW_GREEN;
   }
-  char trimmedCommand[COMMAND_BUFFER_SIZE];
-  memcpy(trimmedCommand, command, commandSize);
-  trimmedCommand[commandSize] = '\0';
-  command = trimmedCommand;
+  return PHASE_ALL_RED;
+}
 
-  SignalPhase requestedPhase;
-  if (!parsePhase(command, &requestedPhase)) {
-    if (strlen(command) == 3 && command[1] == ':') {
-      const SignalPins *pins = NULL;
-      if (command[0] == 'N') {
-        pins = &NORTH;
-      } else if (command[0] == 'S') {
-        pins = &SOUTH;
-      } else if (command[0] == 'E') {
-        pins = &EAST;
-      } else if (command[0] == 'W') {
-        pins = &WEST;
-      }
+unsigned long durationFor(SignalPhase phase) {
+  if (phase == PHASE_NS_GREEN) {
+    return laneGreenMs[0] > laneGreenMs[1] ? laneGreenMs[0] : laneGreenMs[1];
+  }
+  return laneGreenMs[2] > laneGreenMs[3] ? laneGreenMs[2] : laneGreenMs[3];
+}
 
-      if (pins != NULL && (command[2] == 'R' || command[2] == 'Y' || command[2] == 'G')) {
-        setDirection(*pins, command[2] == 'R', command[2] == 'Y', command[2] == 'G');
-        lastCommandMs = millis();
-        watchdogTriggered = false;
-        Serial.print("ACK:");
-        Serial.println(command);
-        return;
-      }
-    }
-    Serial.println("ERR:UNKNOWN_COMMAND");
+bool isGreenPhase() {
+  return currentPhase == PHASE_NS_GREEN || currentPhase == PHASE_EW_GREEN;
+}
+
+void noteValidCommand() {
+  unsigned long now = millis();
+  lastValidCommandMs = now;
+  if (watchdogTriggered) {
+    watchdogTriggered = false;
+    cycleStarted = false;
+    planReceived = false;
+    requestedGreen = PHASE_NS_GREEN;
+    applyPhase(PHASE_ALL_RED);
+  }
+}
+
+void processCommand(char *command) {
+  char *first = strtok(command, ":");
+  char *second = strtok(NULL, ":");
+  char *third = strtok(NULL, ":");
+  if (first == NULL || second == NULL) {
+    Serial.println("ERR:BAD_COMMAND");
     return;
   }
 
-  applyPhase(requestedPhase);
-  lastCommandMs = millis();
-  watchdogTriggered = false;
-  Serial.print("ACK:");
-  Serial.println(phaseCommand(currentPhase));
-}
-
-void processSingleByte(char command) {
-  SignalPhase requestedPhase;
-  switch (command) {
-    case '0':
-      requestedPhase = PHASE_ALL_RED;
-      break;
-    case '1':
-      requestedPhase = PHASE_NS_GREEN;
-      break;
-    case '2':
-      requestedPhase = PHASE_NS_YELLOW;
-      break;
-    case '3':
-      requestedPhase = PHASE_EW_GREEN;
-      break;
-    case '4':
-      requestedPhase = PHASE_EW_YELLOW;
-      break;
-    default:
+  if (strcmp(first, "SET") == 0 && third != NULL && strtok(NULL, ":") == NULL) {
+    uint8_t laneIndex;
+    if (!parseLane(second, &laneIndex)) {
+      Serial.println("ERR:BAD_LANE");
       return;
+    }
+    char *end = NULL;
+    float seconds = static_cast<float>(strtod(third, &end));
+    unsigned long bounded = boundedGreenMilliseconds(seconds);
+    if (end == third || *end != '\0' || bounded == 0) {
+      Serial.println("ERR:BAD_DURATION");
+      return;
+    }
+    noteValidCommand();
+    if (isGreenPhase() || !cycleStarted) {
+      laneGreenMs[laneIndex] = bounded;
+      planReceived = true;
+    }
+    Serial.print("ACK:SET:");
+    Serial.println(second);
+    return;
   }
-  applyPhase(requestedPhase);
-  lastCommandMs = millis();
-  watchdogTriggered = false;
-  Serial.print("ACK:");
-  Serial.println(phaseCommand(currentPhase));
+
+  if (strcmp(first, "NEXT") == 0 && third == NULL) {
+    SignalPhase target = parseTarget(second);
+    if (target == PHASE_ALL_RED) {
+      Serial.println("ERR:BAD_TARGET");
+      return;
+    }
+    noteValidCommand();
+    if (isGreenPhase() || !cycleStarted) {
+      requestedGreen = target;
+      planReceived = true;
+    }
+    Serial.print("ACK:NEXT:");
+    Serial.println(second);
+    return;
+  }
+
+  if (strcmp(first, "PRIORITY") == 0 && third == NULL) {
+    SignalPhase target = parseTarget(second);
+    if (target == PHASE_ALL_RED) {
+      Serial.println("ERR:BAD_TARGET");
+      return;
+    }
+    noteValidCommand();
+    if (isGreenPhase() || !cycleStarted) {
+      requestedGreen = target;
+      if (isGreenPhase() && millis() - phaseStartedMs >= MIN_GREEN_SECONDS * 1000UL) {
+        activeGreenMs = millis() - phaseStartedMs;
+      }
+    }
+    Serial.print("ACK:PRIORITY:");
+    Serial.println(second);
+    return;
+  }
+
+  if (strcmp(first, "SAFE") == 0 && strcmp(second, "RED") == 0 && third == NULL) {
+    noteValidCommand();
+    cycleStarted = false;
+    planReceived = false;
+    applyPhase(PHASE_ALL_RED);
+    Serial.println("ACK:SAFE:RED");
+    return;
+  }
+
+  Serial.println("ERR:UNKNOWN_COMMAND");
 }
 
 void readSerialCommands() {
   while (Serial.available() > 0) {
     char incoming = static_cast<char>(Serial.read());
-    if (incoming == '\n' || incoming == '\r' || incoming == ';') {
+    if (incoming == '\n' || incoming == '\r') {
       if (discardingCommand) {
         Serial.println("ERR:COMMAND_TOO_LONG");
         discardingCommand = false;
@@ -182,8 +220,6 @@ void readSerialCommands() {
       }
     } else if (discardingCommand) {
       continue;
-    } else if (commandLength == 0 && incoming >= '0' && incoming <= '4') {
-      processSingleByte(incoming);
     } else if (commandLength < COMMAND_BUFFER_SIZE - 1) {
       commandBuffer[commandLength++] = incoming;
     } else {
@@ -193,20 +229,58 @@ void readSerialCommands() {
   }
 }
 
+void advanceSignalState() {
+  unsigned long now = millis();
+  unsigned long elapsed = now - phaseStartedMs;
+
+  if (currentPhase == PHASE_ALL_RED && elapsed >= ALL_RED_DURATION_MS &&
+      ((!cycleStarted && planReceived) || cycleStarted)) {
+    SignalPhase next = requestedGreen;
+    if (cycleStarted) {
+      next = latchedNextGreen;
+    }
+    if (next != PHASE_NS_GREEN && next != PHASE_EW_GREEN) {
+      next = PHASE_NS_GREEN;
+    }
+    activeGreenMs = durationFor(next);
+    applyPhase(next);
+    cycleStarted = true;
+  } else if (currentPhase == PHASE_NS_GREEN && elapsed >= activeGreenMs) {
+    latchedNextGreen = elapsed >= MAX_GREEN_SECONDS * 1000UL
+                           ? PHASE_EW_GREEN
+                           : requestedGreen;
+    activeGreenMs = durationFor(latchedNextGreen);
+    applyPhase(PHASE_NS_YELLOW);
+  } else if (currentPhase == PHASE_EW_GREEN && elapsed >= activeGreenMs) {
+    latchedNextGreen = elapsed >= MAX_GREEN_SECONDS * 1000UL
+                           ? PHASE_NS_GREEN
+                           : requestedGreen;
+    activeGreenMs = durationFor(latchedNextGreen);
+    applyPhase(PHASE_EW_YELLOW);
+  } else if ((currentPhase == PHASE_NS_YELLOW || currentPhase == PHASE_EW_YELLOW) &&
+             elapsed >= YELLOW_DURATION_MS) {
+    applyPhase(PHASE_ALL_RED);
+  }
+}
+
 void setup() {
   for (uint8_t pin = 2; pin <= 13; ++pin) {
     pinMode(pin, OUTPUT);
-    digitalWrite(pin, LOW);
   }
   applyPhase(PHASE_ALL_RED);
   Serial.begin(SERIAL_BAUD_RATE);
-  lastCommandMs = millis();
+  lastValidCommandMs = millis();
 }
 
 void loop() {
   readSerialCommands();
-  if (!watchdogTriggered && millis() - lastCommandMs >= WATCHDOG_TIMEOUT_MS) {
-    applyPhase(PHASE_ALL_RED);
+  unsigned long now = millis();
+  if (!watchdogTriggered && now - lastValidCommandMs >= WATCHDOG_TIMEOUT_MS) {
     watchdogTriggered = true;
+    cycleStarted = false;
+    applyPhase(PHASE_ALL_RED);
+  }
+  if (!watchdogTriggered) {
+    advanceSignalState();
   }
 }

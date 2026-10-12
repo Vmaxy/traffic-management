@@ -14,6 +14,8 @@ def test_reads_defaults_and_normalizes_numeric_video_source(monkeypatch):
     assert settings.confidence_threshold == 0.20
     assert settings.min_green_seconds == 3.0
     assert settings.max_green_seconds == 30.0
+    assert settings.green_scale_factor == 1.5
+    assert settings.max_video_fps == 30.0
 
     monkeypatch.setenv("TRAFFIC_VIDEO_SOURCE", "3")
     assert Settings.from_env().video_source == 3
@@ -37,8 +39,10 @@ def test_resolves_relative_roi_path_against_project(monkeypatch):
         ("TRAFFIC_SERIAL_BAUD", "0"),
         ("TRAFFIC_SERIAL_BAUD", "fast"),
         ("TRAFFIC_MIN_GREEN_SECONDS", "-1"),
+        ("TRAFFIC_MIN_GREEN_SECONDS", "2.9"),
+        ("TRAFFIC_MAX_GREEN_SECONDS", "31"),
         ("TRAFFIC_CAMERA_RETRY_SECONDS", "inf"),
-        ("TRAFFIC_HEARTBEAT_SECONDS", "3.0"),
+        ("TRAFFIC_HEARTBEAT_SECONDS", "10.0"),
         ("TRAFFIC_LOG_LEVEL", "TRACE"),
     ],
 )

@@ -6,7 +6,7 @@ import time
 import pytest
 
 from traffic_core.safety_fsm import Phase
-from traffic_core.serial_controller import ArduinoSerialController, PHASE_COMMANDS
+from traffic_core.serial_controller import ArduinoSerialController, LANES
 
 
 class FakeSerial:
@@ -67,16 +67,15 @@ def test_sends_phases_and_periodic_keepalives():
         serial_factory=lambda **_: fake_serial,
     )
     try:
-        assert wait_until(lambda: fake_serial.count(PHASE_COMMANDS[Phase.ALL_RED].encode()) >= 1)
-        controller.set_phase(Phase.NS_GREEN)
-        green_command = PHASE_COMMANDS[Phase.NS_GREEN].encode()
-        assert wait_until(lambda: fake_serial.count(green_command) >= 2)
+        controller.set_plan(Phase.NS_GREEN, {lane: 5.0 for lane in LANES})
+        assert wait_until(lambda: fake_serial.count(b"SET:N:5.00\n") >= 1)
+        assert wait_until(lambda: fake_serial.count(b"NEXT:NS\n") >= 2)
         assert controller.status == "CONNECTED"
     finally:
         controller.shutdown()
 
     assert fake_serial.closed
-    assert fake_serial.count(PHASE_COMMANDS[Phase.ALL_RED].encode()) >= 2
+    assert fake_serial.count(b"SAFE:RED\n") >= 1
 
 
 def test_phase_update_is_non_blocking_when_serial_open_is_slow():
@@ -97,11 +96,11 @@ def test_phase_update_is_non_blocking_when_serial_open_is_slow():
     try:
         assert factory_entered.wait(timeout=1.0)
         started = time.monotonic()
-        controller.set_phase(Phase.EW_GREEN)
+        controller.set_plan(Phase.EW_GREEN, {lane: 6.0 for lane in LANES})
         update_duration = time.monotonic() - started
         assert update_duration < 0.1
         opening.set()
-        assert wait_until(lambda: fake_serial.count(PHASE_COMMANDS[Phase.EW_GREEN].encode()) >= 1)
+        assert wait_until(lambda: fake_serial.count(b"NEXT:EW\n") >= 1)
     finally:
         opening.set()
         controller.shutdown()
@@ -123,15 +122,32 @@ def test_reads_newline_framed_acknowledgments_without_blocking():
         controller.shutdown()
 
 
-def test_phase_commands_are_compact_and_newline_delimited():
-    assert PHASE_COMMANDS[Phase.NS_GREEN] == "NS_G\n"
-    assert PHASE_COMMANDS[Phase.NS_YELLOW] == "NS_Y\n"
-    assert PHASE_COMMANDS[Phase.EW_GREEN] == "EW_G\n"
-    assert PHASE_COMMANDS[Phase.EW_YELLOW] == "EW_Y\n"
-    assert PHASE_COMMANDS[Phase.ALL_RED] == "ALL_R\n"
+def test_plan_uses_one_duration_command_per_lane_and_a_direction_request():
+    assert LANES == ("NORTH", "SOUTH", "EAST", "WEST")
+    expected = (
+        b"SET:N:3.00\n",
+        b"SET:S:4.00\n",
+        b"SET:E:5.00\n",
+        b"SET:W:6.00\n",
+        b"NEXT:EW\n",
+    )
+    fake_serial = FakeSerial()
+    controller = ArduinoSerialController(
+        port="fake",
+        reconnect_seconds=0.05,
+        serial_factory=lambda **_: fake_serial,
+    )
+    try:
+        controller.set_plan(
+            Phase.EW_GREEN,
+            {"NORTH": 3, "SOUTH": 4, "EAST": 5, "WEST": 6},
+        )
+        assert wait_until(lambda: all(fake_serial.count(command) >= 1 for command in expected))
+    finally:
+        controller.shutdown()
 
 
-@pytest.mark.parametrize("heartbeat", [3.0, 4.0])
+@pytest.mark.parametrize("heartbeat", [10.0, 11.0])
 def test_heartbeat_must_precede_hardware_watchdog(heartbeat):
-    with pytest.raises(ValueError, match="3-second watchdog"):
+    with pytest.raises(ValueError, match="10-second watchdog"):
         ArduinoSerialController(heartbeat_seconds=heartbeat)

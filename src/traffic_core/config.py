@@ -42,8 +42,10 @@ class Settings:
     camera_retry_seconds: float = 2.0
     min_green_seconds: float = 3.0
     max_green_seconds: float = 30.0
-    yellow_seconds: float = 2.0
-    all_red_seconds: float = 1.0
+    green_scale_factor: float = 1.5
+    max_video_fps: float = 30.0
+    yellow_seconds: float = 3.0
+    all_red_seconds: float = 1.5
     heartbeat_seconds: float = 1.0
     log_level: str = "INFO"
 
@@ -73,15 +75,20 @@ class Settings:
             raise ValueError("TRAFFIC_SERIAL_BAUD must be greater than zero")
 
         heartbeat = _positive_float("TRAFFIC_HEARTBEAT_SECONDS", 1.0)
-        if heartbeat >= 3.0:
+        if heartbeat >= 10.0:
             raise ValueError(
-                "TRAFFIC_HEARTBEAT_SECONDS must be less than the 3-second Arduino watchdog"
+                "TRAFFIC_HEARTBEAT_SECONDS must be less than the 10-second Arduino watchdog"
             )
 
         min_green = _positive_float("TRAFFIC_MIN_GREEN_SECONDS", 3.0)
         max_green = _positive_float("TRAFFIC_MAX_GREEN_SECONDS", 30.0)
+        if min_green < 3.0:
+            raise ValueError("TRAFFIC_MIN_GREEN_SECONDS must be at least 3 seconds")
+        if max_green > 30.0:
+            raise ValueError("TRAFFIC_MAX_GREEN_SECONDS must be at most 30 seconds")
         if max_green < min_green:
             raise ValueError("TRAFFIC_MAX_GREEN_SECONDS must be at least TRAFFIC_MIN_GREEN_SECONDS")
+        green_scale_factor = _positive_float("TRAFFIC_GREEN_SCALE_FACTOR", 1.5)
 
         serial_port = os.getenv("TRAFFIC_SERIAL_PORT", "").strip() or None
         log_level = os.getenv("TRAFFIC_LOG_LEVEL", "INFO").upper()
@@ -98,8 +105,10 @@ class Settings:
             camera_retry_seconds=_positive_float("TRAFFIC_CAMERA_RETRY_SECONDS", 2.0),
             min_green_seconds=min_green,
             max_green_seconds=max_green,
-            yellow_seconds=_positive_float("TRAFFIC_YELLOW_SECONDS", 2.0),
-            all_red_seconds=_positive_float("TRAFFIC_ALL_RED_SECONDS", 1.0),
+            green_scale_factor=green_scale_factor,
+            max_video_fps=_positive_float("TRAFFIC_MAX_VIDEO_FPS", 30.0),
+            yellow_seconds=_positive_float("TRAFFIC_YELLOW_SECONDS", 3.0),
+            all_red_seconds=_positive_float("TRAFFIC_ALL_RED_SECONDS", 1.5),
             heartbeat_seconds=heartbeat,
             log_level=log_level,
         )
