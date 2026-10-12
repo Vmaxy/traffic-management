@@ -1,6 +1,8 @@
 # AI Miniature Traffic Management System
 
-The Python application reads an overhead camera stream, detects COCO car, bus, and truck classes with Ultralytics YOLO, counts detections in four approach regions, and selects conflict-free traffic phases. Red-and-white vehicle appearance and high-confidence bus/truck matches flag likely toy ambulances. An Arduino Uno/Nano drives the 12 signal LEDs. Python sends newline-delimited `NS_G`, `NS_Y`, `EW_G`, `EW_Y`, and `ALL_R` commands; Arduino acknowledges each phase and independently returns to all-red if it receives no valid command for 3 seconds.
+The Python application reads an overhead camera stream, detects COCO car, bus, and truck classes with Ultralytics YOLO, counts detections in four approach regions, and selects conflict-free traffic phases. Red-and-white vehicle appearance and high-confidence bus/truck matches flag likely toy ambulances. An Arduino Uno/Nano drives the 12 signal LEDs on digital pins 2-13; pins 0 (RX) and 1 (TX) remain available for USB serial. The firmware reads serial data without blocking, applies each complete command immediately, and independently returns to all-red if it receives no valid command for 3 seconds.
+
+The Python controller sends newline-delimited `NS_G`, `NS_Y`, `EW_G`, `EW_Y`, and `ALL_R` phase commands. Firmware also accepts single-byte phase codes `0`-`4` in that order, or individual lane states as `N:R`, `N:Y`, `N:G` (likewise `S`, `E`, or `W`), terminated by newline, carriage return, or semicolon. Individual lane commands change only that approach's three LEDs. Valid commands receive an `ACK:` response; invalid framed commands receive an `ERR:` response.
 
 ## Setup
 
